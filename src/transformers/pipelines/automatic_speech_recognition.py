@@ -422,6 +422,8 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
             if self.type != "seq2seq_whisper":
                 raise ValueError("Only Whisper can return average log probabilities for now.")
             postprocess_params["return_avg_log_prob"] = return_avg_log_prob
+            forward_params["generate_kwargs"]['return_dict_in_generate'] = True
+            forward_params["generate_kwargs"]['output_scores'] = True
 
         return preprocess_params, forward_params, postprocess_params
 
