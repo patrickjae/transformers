@@ -364,6 +364,7 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
         decoder_kwargs=None,
         return_timestamps=None,
         return_language=None,
+        return_avg_log_prob=None,
         generate_kwargs=None,
         max_new_tokens=None,
     ):
@@ -417,6 +418,10 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
             if self.type != "seq2seq_whisper":
                 raise ValueError("Only Whisper can return language for now.")
             postprocess_params["return_language"] = return_language
+        if return_avg_log_prob is not None:
+            if self.type != "seq2seq_whisper":
+                raise ValueError("Only Whisper can return average log probabilities for now.")
+            postprocess_params["return_avg_log_prob"] = return_avg_log_prob
 
         return preprocess_params, forward_params, postprocess_params
 
@@ -601,7 +606,7 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
         return {"is_last": is_last, **out, **extra}
 
     def postprocess(
-        self, model_outputs, decoder_kwargs: Optional[Dict] = None, return_timestamps=None, return_language=None
+        self, model_outputs, decoder_kwargs: Optional[Dict] = None, return_timestamps=None, return_language=None, return_avg_log_prob=None
     ):
         # Optional return types
         optional = {}
@@ -641,6 +646,7 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
                 model_outputs,
                 return_timestamps=return_timestamps,
                 return_language=return_language,
+                return_avg_log_prob=return_avg_log_prob,
                 time_precision=time_precision,
             )
         else:

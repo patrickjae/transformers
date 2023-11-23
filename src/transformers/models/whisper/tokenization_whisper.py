@@ -815,12 +815,13 @@ class WhisperTokenizer(PreTrainedTokenizer):
         forced_decoder_ids = [(rank + 1, token) for rank, token in enumerate(forced_tokens)]
         return forced_decoder_ids
 
-    def _decode_asr(self, model_outputs, *, return_timestamps, return_language, time_precision):
+    def _decode_asr(self, model_outputs, *, return_timestamps, return_language, return_avg_log_prob, time_precision):
         return _decode_asr(
             self,
             model_outputs,
             return_timestamps=return_timestamps,
             return_language=return_language,
+            return_avg_log_prob=return_avg_log_prob,
             time_precision=time_precision,
         )
 
@@ -850,7 +851,7 @@ class WhisperTokenizer(PreTrainedTokenizer):
         return token_ids
 
 
-def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language, time_precision):
+def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language, return_avg_log_prob, time_precision):
     """
     Internal method meant to only be used by asr pipeline. Handles all the little quirks specific to whisper to handle
     the various options not allowed in other seq2seq models
@@ -871,7 +872,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
     last_language = None
 
     def new_chunk():
-        return {"language": last_language, "timestamp": [None, None], "text": ""}
+        return {"language": last_language, "timestamp": [None, None], "text": "", "avg_log_prob": None}
 
     # Welcome to the state machine !
     chunks = []
@@ -945,6 +946,8 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                     if last_language and language != last_language and not return_timestamps:
                         previous_tokens.append(current_tokens)
                         resolved_tokens = _find_longest_common_sequence(previous_tokens)
+                        if return_avg_log_prob:
+                            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
                         resolved_text = tokenizer.decode(resolved_tokens)
                         chunk["text"] = resolved_text
                         chunks.append(chunk)
@@ -992,6 +995,8 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                         resolved_tokens, resolved_token_timestamps = _find_longest_common_sequence(
                             previous_tokens, previous_token_timestamps
                         )
+                        if return_avg_log_prob:
+                            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
                         resolved_text = tokenizer.decode(resolved_tokens)
                         chunk["text"] = resolved_text
                         if return_timestamps == "word":
@@ -1044,6 +1049,8 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
         resolved_tokens, resolved_token_timestamps = _find_longest_common_sequence(
             previous_tokens, previous_token_timestamps
         )
+        if return_avg_log_prob:
+            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
         resolved_text = tokenizer.decode(resolved_tokens)
         chunk["text"] = resolved_text
         if return_timestamps == "word":
@@ -1074,6 +1081,18 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
         optional = {}
     return full_text, optional
 
+def _compute_log_probs(all_tokens, token_ids, scores):
+    import torch
+    # find token positions in original output
+    num_tokens = len(token_ids)
+    start = 0
+    stop = 0
+    for ind in (i for i, e in enumerate(all_tokens) if e==token_ids[0]):
+        if all_tokens[ind:ind+num_tokens] == token_ids:
+            start = ind
+            stop = ind + num_tokens - 1
+    token_scores = list(map(lambda tok_tensor: torch.log(torch.max(torch.softmax(tok_tensor, dim=-1))).tolist(), scores[start:stop]))
+    return sum(token_scores)/len(token_scores)
 
 def _find_longest_common_sequence(sequences, token_timestamp_sequences=None):
     # It would be much harder to do O(n) because of fault tolerance.
