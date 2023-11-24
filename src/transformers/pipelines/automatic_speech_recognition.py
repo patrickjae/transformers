@@ -419,6 +419,12 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
                 raise ValueError("Only Whisper can return language for now.")
             postprocess_params["return_language"] = return_language
 
+        if return_avg_log_prob is not None:
+            if self.type != "seq2seq_whisper":
+                raise ValueError("Only Whisper can return average log probabilities for now.")
+            postprocess_params["return_avg_log_prob"] = return_avg_log_prob
+            forward_params["generate_kwargs"]['return_dict_in_generate'] = True
+            forward_params["generate_kwargs"]['output_scores'] = True
         return preprocess_params, forward_params, postprocess_params
 
     def preprocess(self, inputs, chunk_length_s=0, stride_length_s=None):
