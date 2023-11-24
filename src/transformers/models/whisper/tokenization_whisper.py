@@ -813,12 +813,13 @@ class WhisperTokenizer(PreTrainedTokenizer):
         forced_decoder_ids = [(rank + 1, token) for rank, token in enumerate(forced_tokens)]
         return forced_decoder_ids
 
-    def _decode_asr(self, model_outputs, *, return_timestamps, return_language, time_precision):
+    def _decode_asr(self, model_outputs, *, return_timestamps, return_language, return_avg_log_prob, time_precision):
         return _decode_asr(
             self,
             model_outputs,
             return_timestamps=return_timestamps,
             return_language=return_language,
+            return_avg_log_prob=return_avg_log_prob,
             time_precision=time_precision,
         )
 
@@ -848,7 +849,7 @@ class WhisperTokenizer(PreTrainedTokenizer):
         return token_ids
 
 
-def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language, time_precision):
+def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language, return_avg_log_prob, time_precision):
     """
     Internal method meant to only be used by asr pipeline. Handles all the little quirks specific to whisper to handle
     the various options not allowed in other seq2seq models
