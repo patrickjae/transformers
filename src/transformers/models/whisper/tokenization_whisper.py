@@ -20,6 +20,7 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import regex as re
+import torch
 
 from ...tokenization_utils import AddedToken, PreTrainedTokenizer
 from ...utils import logging
@@ -879,6 +880,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
     timestamp_begin = tokenizer.convert_tokens_to_ids("<|notimestamps|>") + 1
     previous_tokens = []
     previous_token_timestamps = []
+    previous_token_log_probs = []
     skip = False
     right_stride_start = None
 
@@ -887,7 +889,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
     for chunk_id, output in enumerate(model_outputs):
         # We can drop everything to Python list, it's going to make
         # our lives easier
-        token_ids = output["tokens"][0].tolist()
+        token_ids = output["tokens"][0].flatten().tolist()
         if return_timestamps == "word":
             token_timestamps = output["token_timestamps"][0].tolist()
 
@@ -922,6 +924,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                         last_timestamp = token
 
         current_tokens = []
+        current_token_log_probs = []
         current_token_timestamps = []
 
         # - all tokens within output
@@ -943,16 +946,21 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                     # one, and we cannot use timestamped tokens to create chunks
                     if last_language and language != last_language and not return_timestamps:
                         previous_tokens.append(current_tokens)
-                        resolved_tokens = _find_longest_common_sequence(previous_tokens)
+                        previous_token_log_probs.append(current_token_log_probs)
                         if return_avg_log_prob:
-                            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
+                            resolved_tokens, [], resolved_token_log_probs = _find_longest_common_sequence(previous_tokens, token_log_prob_sequences=previous_token_log_probs)
+                            chunk["avg_log_prob"] = sum(resolved_token_log_probs)/len(resolved_token_log_probs)
+                        else:
+                            resolved_tokens = _find_longest_common_sequence(previous_tokens)
                         resolved_text = tokenizer.decode(resolved_tokens)
                         chunk["text"] = resolved_text
                         chunks.append(chunk)
 
                         # Flush all our temporary context
                         previous_tokens = []
+                        previous_token_log_probs = []
                         current_tokens = []
+                        current_token_log_probs = []
                         chunk = new_chunk()
                     chunk["language"] = language
                     last_language = language
@@ -988,13 +996,14 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                         chunk["timestamp"][1] = time
                         # Handling merges.
                         previous_tokens.append(current_tokens)
+                        previous_token_log_probs.append(current_token_log_probs)
                         if return_timestamps == "word":
                             previous_token_timestamps.append(current_token_timestamps)
-                        resolved_tokens, resolved_token_timestamps = _find_longest_common_sequence(
-                            previous_tokens, previous_token_timestamps
+                        resolved_tokens, resolved_token_timestamps, resolved_token_log_probs = _find_longest_common_sequence(
+                            previous_tokens, token_timestamp_sequences=previous_token_timestamps, token_log_prob_sequences=previous_token_log_probs
                         )
                         if return_avg_log_prob:
-                            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
+                            chunk["avg_log_prob"] = sum(resolved_token_log_probs)/len(resolved_token_log_probs)
                         resolved_text = tokenizer.decode(resolved_tokens)
                         chunk["text"] = resolved_text
                         if return_timestamps == "word":
@@ -1005,7 +1014,9 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
 
                         # Flush all our temporary context
                         previous_tokens = []
+                        previous_token_log_probs = []
                         current_tokens = []
+                        current_token_log_probs = []
                         previous_token_timestamps = []
                         current_token_timestamps = []
                         chunk = new_chunk()
@@ -1014,6 +1025,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                 # We just append to the list of all tokens so we can handle
                 # merges later and decode into text.
                 current_tokens.append(token)
+                current_token_log_probs.append(torch.log(torch.max(torch.softmax(output["tokens"][1][i], dim=-1))).tolist())
                 if return_timestamps == "word":
                     start_time = round(token_timestamps[i] + time_offset, 2)
                     if i + 1 < len(token_timestamps):
@@ -1024,16 +1036,19 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
 
         if "stride" in output:
             time_offset += chunk_len - stride_right
-
+        
         # Leftover tokens
         if current_tokens:
             previous_tokens.append(current_tokens)
+            previous_token_log_probs.append(current_token_log_probs)
             if return_timestamps == "word":
                 previous_token_timestamps.append(current_token_timestamps)
         elif not (any(p for p in previous_tokens)):
             chunk = new_chunk()
             previous_tokens = []
+            previous_token_log_probs = []
             current_tokens = []
+            current_token_log_probs = []
             previous_token_timestamps = []
             current_token_timestamps = []
 
@@ -1044,11 +1059,11 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                 "Also make sure WhisperTimeStampLogitsProcessor was used during generation."
             )
         # Happens when we don't use timestamps
-        resolved_tokens, resolved_token_timestamps = _find_longest_common_sequence(
-            previous_tokens, previous_token_timestamps
+        resolved_tokens, resolved_token_timestamps, resolved_token_log_probs = _find_longest_common_sequence(
+            previous_tokens, token_timestamp_sequences=previous_token_timestamps, token_log_prob_sequences=previous_token_log_probs
         )
         if return_avg_log_prob:
-            chunk["avg_log_prob"] = _compute_log_probs(token_ids, resolved_tokens, output["tokens"][1])
+            chunk["avg_log_prob"] = sum(resolved_token_log_probs)/len(resolved_token_log_probs)
         resolved_text = tokenizer.decode(resolved_tokens)
         chunk["text"] = resolved_text
         if return_timestamps == "word":
@@ -1059,7 +1074,7 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
 
     # Preparing and cleaning up the pipeline output
     full_text = "".join(chunk["text"] for chunk in chunks)
-    if return_timestamps or return_language:
+    if return_timestamps or return_language or return_avg_log_prob:
         for chunk in chunks:
             if not return_timestamps:
                 chunk.pop("timestamp")
@@ -1067,6 +1082,8 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
                 chunk["timestamp"] = tuple(chunk["timestamp"])
             if not return_language:
                 chunk.pop("language")
+            if not return_avg_log_prob:
+                chunk.pop("avg_log_prob")
 
         if return_timestamps == "word":
             new_chunks = []
@@ -1079,26 +1096,14 @@ def _decode_asr(tokenizer, model_outputs, *, return_timestamps, return_language,
         optional = {}
     return full_text, optional
 
-def _compute_log_probs(all_tokens, token_ids, scores):
-    import torch
-    # find token positions in original output
-    num_tokens = len(token_ids)
-    start = 0
-    stop = 0
-    for ind in (i for i, e in enumerate(all_tokens) if e==token_ids[0]):
-        if all_tokens[ind:ind+num_tokens] == token_ids:
-            start = ind
-            stop = ind + num_tokens - 1
-    token_scores = list(map(lambda tok_tensor: torch.log(torch.max(torch.softmax(tok_tensor, dim=-1))).tolist(), scores[start:stop]))
-    return sum(token_scores)/len(token_scores)
 
-def _find_longest_common_sequence(sequences, token_timestamp_sequences=None):
+
+def _find_longest_common_sequence(sequences, token_timestamp_sequences=None, token_log_prob_sequences=None):
     # It would be much harder to do O(n) because of fault tolerance.
     # We actually have a really good property which is that the total sequence
     # MUST be those subsequences in order.
     # If token_timestamp_sequences is provided, will split those sequences in
     # exactly the same way.
-
     left_sequence = sequences[0]
     left_length = len(left_sequence)
     total_sequence = []
@@ -1106,6 +1111,10 @@ def _find_longest_common_sequence(sequences, token_timestamp_sequences=None):
     if token_timestamp_sequences:
         left_token_timestamp_sequence = token_timestamp_sequences[0]
         total_token_timestamp_sequence = []
+        
+    if token_log_prob_sequences:
+        left_token_log_prob_sequence = token_log_prob_sequences[0]
+        total_token_log_prob_sequence = []
 
     for seq_idx, right_sequence in enumerate(sequences[1:]):
         # index = 0
@@ -1184,17 +1193,27 @@ def _find_longest_common_sequence(sequences, token_timestamp_sequences=None):
         if token_timestamp_sequences:
             total_token_timestamp_sequence.extend(left_token_timestamp_sequence[:left_mid])
             left_token_timestamp_sequence = token_timestamp_sequences[seq_idx + 1][right_mid:]
+            
+        if token_log_prob_sequences:
+            total_token_log_prob_sequence.extend(left_token_log_prob_sequence[:left_mid])
+            left_token_log_prob_sequence = token_log_prob_sequences[seq_idx + 1][right_mid:]
 
     total_sequence.extend(left_sequence)
 
-    if token_timestamp_sequences is None:
+    if token_timestamp_sequences is None and token_log_prob_sequences is None:
         return total_sequence
 
-    if len(token_timestamp_sequences) > 0:
+    if token_timestamp_sequences and not token_log_prob_sequences:
         total_token_timestamp_sequence.extend(left_token_timestamp_sequence)
-        return total_sequence, total_token_timestamp_sequence
-    else:
-        return total_sequence, []
+        return total_sequence, total_token_timestamp_sequence, []
+    
+    if token_log_prob_sequences and not token_timestamp_sequences:
+        total_token_log_prob_sequence.extend(left_token_log_prob_sequence)
+        return total_sequence, [], total_token_log_prob_sequence
+    
+    total_token_timestamp_sequence.extend(left_token_timestamp_sequence)
+    total_token_log_prob_sequence.extend(left_token_log_prob_sequence)
+    return total_sequence, total_token_timestamp_sequence, total_token_log_prob_sequence
 
 
 def _collate_word_timestamps(tokenizer, tokens, token_timestamps, language):
