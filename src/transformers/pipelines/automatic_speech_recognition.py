@@ -19,7 +19,7 @@ import requests
 
 from ..modelcard import ModelCard
 from ..tokenization_utils import PreTrainedTokenizer
-from ..utils import is_torch_available, is_torchaudio_available, logging
+from ..utils import ModelOutput, is_torch_available, is_torchaudio_available, logging
 from .audio_utils import ffmpeg_read
 from .base import ArgumentHandler, ChunkPipeline, infer_framework_load_model
 
@@ -603,7 +603,10 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
         key = "logits" if self.type == "ctc_with_lm" else "tokens"
         stride = None
         for outputs in model_outputs:
-            items = outputs[key].numpy()
+            if isinstance(outputs[key], ModelOutput):
+                items = outputs[key]["sequences"].flatten().numpy()
+            else:
+                items = outputs[key].numpy()
             stride = outputs.get("stride", None)
             if stride is not None and self.type in {"ctc", "ctc_with_lm"}:
                 total_n, left, right = stride
